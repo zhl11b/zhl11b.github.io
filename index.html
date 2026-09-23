@@ -1,1 +1,1643 @@
-Hello world
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>未粘的马赛克</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #050403;
+    overflow: hidden;
+  }
+  canvas {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 100vmin;
+    height: 100vmin;
+    transform: translate(-50%, -50%);
+    display: block;
+  }
+  #sound {
+    position: absolute;
+    left: 50%;
+    bottom: 4.5vh;
+    transform: translateX(-50%);
+    color: #e7d3a4;
+    font: 13px/1 "Songti SC", "SimSun", "Noto Serif SC", serif;
+    letter-spacing: 0.42em;
+    text-indent: 0.42em;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.8s ease;
+    z-index: 2;
+    background: none;
+    border: none;
+    padding: 0.6em 0.2em;
+  }
+  #sound.show { opacity: 0.9; pointer-events: auto; cursor: pointer; }
+  #err {
+    position: absolute;
+    inset: 0;
+    margin: 0;
+    padding: 12px;
+    overflow: auto;
+    color: #f3d7a1;
+    background: #140e0a;
+    font: 12px/1.35 ui-monospace, monospace;
+    z-index: 3;
+    white-space: pre-wrap;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<button id="sound" type="button">点击开启声音</button>
+<script>
+"use strict";
+
+const DURATION = 80;
+const N = 48;
+
+const params = new URLSearchParams(location.search);
+const startAt = Number(params.get("t")) || 0;
+const freeze = params.has("freeze");
+
+const canvas = document.getElementById("c");
+const soundBtn = document.getElementById("sound");
+
+const F_NONE = 0, F_FISH = 1, F_C1 = 2, F_C2 = 3, F_DOVE = 4, F_STAR = 5;
+const MAT_GOLD = 0, MAT_GLASS = 1, MAT_DARK = 2;
+
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+function hash2(a, b) {
+  const s = Math.sin(a * 127.1 + b * 311.7) * 43758.5453123;
+  return s - Math.floor(s);
+}
+function vary(c, amt, h) {
+  return [
+    clamp(c[0] + (h - 0.5) * amt, 0, 1),
+    clamp(c[1] + (h - 0.5) * amt * 0.85, 0, 1),
+    clamp(c[2] + (h - 0.5) * amt * 0.55, 0, 1)
+  ];
+}
+function goldOf(h) {
+  const pals = [
+    [0.86, 0.62, 0.24],
+    [0.93, 0.76, 0.38],
+    [0.74, 0.48, 0.16],
+    [0.80, 0.58, 0.22],
+    [0.96, 0.84, 0.52],
+    [0.64, 0.40, 0.12],
+    [0.90, 0.70, 0.30]
+  ];
+  const i = Math.floor(h * pals.length) % pals.length;
+  return vary(pals[i], 0.08, hash2(h * 20, 3));
+}
+function navyOf(h) {
+  return [
+    0.035 + h * 0.025,
+    0.05 + h * 0.03,
+    0.12 + h * 0.07
+  ];
+}
+
+const cell = 2 / N;
+const tiles = [];
+for (let iy = 0; iy < N; iy++) {
+  for (let ix = 0; ix < N; ix++) {
+    const h = hash2(ix + 0.5, iy + 2.5);
+    let x = ((ix + 0.5) / N) * 2 - 1;
+    let y = 1 - ((iy + 0.5) / N) * 2;
+    x += (hash2(ix, iy + 19) - 0.5) * cell * 0.07;
+    y += (hash2(ix + 7, iy) - 0.5) * cell * 0.07;
+    tiles.push({
+      ix, iy, x, y,
+      day: goldOf(h),
+      night: navyOf(h),
+      mat: MAT_GOLD,
+      flock: F_NONE,
+      tail: 0,
+      wing: 0,
+      lx: 0,
+      ly: 0,
+      tx: x,
+      ty: y,
+      seed: (h + hash2(iy, ix)) % 1,
+      flag: 0,
+      sun: false
+    });
+  }
+}
+
+function inBounds(ix, iy) {
+  return ix >= 0 && iy >= 0 && ix < N && iy < N;
+}
+function eachTile(fn) {
+  for (let i = 0; i < tiles.length; i++) fn(tiles[i]);
+}
+function ellipseHit(ix, iy, cx, cy, rx, ry, rot) {
+  const dx = ix + 0.5 - cx;
+  const dy = iy + 0.5 - cy;
+  const c = Math.cos(rot || 0);
+  const s = Math.sin(rot || 0);
+  const x = dx * c + dy * s;
+  const y = -dx * s + dy * c;
+  return (x * x) / (rx * rx) + (y * y) / (ry * ry) <= 1;
+}
+function stampEllipse(cx, cy, rx, ry, rot, fn) {
+  const pad = Math.ceil(Math.max(rx, ry) + 1);
+  for (let iy = Math.floor(cy - pad); iy <= Math.ceil(cy + pad); iy++) {
+    for (let ix = Math.floor(cx - pad); ix <= Math.ceil(cx + pad); ix++) {
+      if (!inBounds(ix, iy)) continue;
+      if (ellipseHit(ix, iy, cx, cy, rx, ry, rot)) fn(tiles[iy * N + ix], ix, iy);
+    }
+  }
+}
+function closestT(px, py, ax, ay, bx, by) {
+  const vx = bx - ax, vy = by - ay;
+  const l2 = vx * vx + vy * vy;
+  if (l2 < 1e-8) return 0;
+  return clamp(((px - ax) * vx + (py - ay) * vy) / l2, 0, 1);
+}
+function stampCapsule(x0, y0, x1, y1, r, fn) {
+  const minx = Math.floor(Math.min(x0, x1) - r - 1);
+  const maxx = Math.ceil(Math.max(x0, x1) + r + 1);
+  const miny = Math.floor(Math.min(y0, y1) - r - 1);
+  const maxy = Math.ceil(Math.max(y0, y1) + r + 1);
+  for (let iy = miny; iy <= maxy; iy++) {
+    for (let ix = minx; ix <= maxx; ix++) {
+      if (!inBounds(ix, iy)) continue;
+      const t = closestT(ix + 0.5, iy + 0.5, x0, y0, x1, y1);
+      const x = x0 + (x1 - x0) * t;
+      const y = y0 + (y1 - y0) * t;
+      const dx = ix + 0.5 - x;
+      const dy = iy + 0.5 - y;
+      if (dx * dx + dy * dy <= r * r) fn(tiles[iy * N + ix], t);
+    }
+  }
+}
+function bez(p0, p1, p2, t) {
+  const u = 1 - t;
+  return [
+    u * u * p0[0] + 2 * u * t * p1[0] + t * t * p2[0],
+    u * u * p0[1] + 2 * u * t * p1[1] + t * t * p2[1]
+  ];
+}
+function stampBezier(p0, p1, p2, r, fn) {
+  const steps = 28;
+  let minx = 99, maxx = -99, miny = 99, maxy = -99;
+  for (let i = 0; i <= steps; i++) {
+    const p = bez(p0, p1, p2, i / steps);
+    minx = Math.min(minx, p[0]); maxx = Math.max(maxx, p[0]);
+    miny = Math.min(miny, p[1]); maxy = Math.max(maxy, p[1]);
+  }
+  for (let iy = Math.floor(miny - r - 1); iy <= Math.ceil(maxy + r + 1); iy++) {
+    for (let ix = Math.floor(minx - r - 1); ix <= Math.ceil(maxx + r + 1); ix++) {
+      if (!inBounds(ix, iy)) continue;
+      let best = 1e9, bestT = 0;
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const p = bez(p0, p1, p2, t);
+        const dx = ix + 0.5 - p[0];
+        const dy = iy + 0.5 - p[1];
+        const d = dx * dx + dy * dy;
+        if (d < best) { best = d; bestT = t; }
+      }
+      if (best <= r * r) fn(tiles[iy * N + ix], bestT);
+    }
+  }
+}
+
+function seaLine(ix) {
+  return 29.4 + Math.sin(ix * 0.42) * 0.85 + Math.sin(ix * 0.13 + 1.2) * 0.45;
+}
+
+eachTile((t) => {
+  const boundary = seaLine(t.ix);
+  if (t.iy + 0.5 > boundary) {
+    const depth = clamp((t.iy - boundary) / 16, 0, 1);
+    const h = t.seed;
+    const shallow = [0.10, 0.38, 0.52];
+    const mid = [0.05, 0.24, 0.48];
+    const deep = [0.03, 0.12, 0.30];
+    let col = depth < 0.45
+      ? vary(lerpArr(shallow, mid, depth / 0.45), 0.06, h)
+      : vary(lerpArr(mid, deep, (depth - 0.45) / 0.55), 0.05, h);
+    const wave = 4.2 + Math.sin(t.ix * 0.55 + 0.6) * 0.7;
+    if (Math.abs((t.iy + 0.5) - (boundary + wave)) < 0.85) {
+      col = vary([0.07, 0.28, 0.46], 0.03, h);
+    }
+    if (Math.abs((t.iy + 0.5) - boundary) < 1.15) {
+      col = vary([0.55, 0.72, 0.70], 0.04, h);
+    }
+    t.day = col;
+    t.mat = MAT_GLASS;
+    t.night = [
+      0.05 + h * 0.025,
+      0.28 + h * 0.08,
+      0.30 + h * 0.06
+    ];
+  } else {
+    const sx = 24.0, sy = 16.2, sr = 7.6;
+    const dx = t.ix + 0.5 - sx;
+    const dy = t.iy + 0.5 - sy;
+    if (dx * dx + dy * dy < sr * sr) {
+      t.day = vary([0.97, 0.86, 0.55], 0.05, t.seed);
+      t.sun = true;
+      t.night = [0.11, 0.07, 0.10];
+    }
+  }
+});
+
+function lerpArr(a, b, t) {
+  return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
+}
+
+function paintFish() {
+  const copper = [0.74, 0.40, 0.16];
+  const oranges = [[0.90, 0.34, 0.07], [0.78, 0.26, 0.05], [0.86, 0.40, 0.10]];
+  const blue = [0.22, 0.48, 0.86];
+  const bodyC = [27.2, 38.0];
+  const rot = -0.04;
+  function mark(t, col, mat) {
+    if (t.ix < 2 || t.iy < 2 || t.ix >= N - 2 || t.iy >= N - 2) return;
+    t.flock = F_FISH;
+    t.mat = mat;
+    t.day = vary(col, 0.045, t.seed);
+    t.wing = 0;
+  }
+  function paintBodyTile(t) {
+    const h = hash2(t.ix * 1.3, t.iy * 1.7);
+    const up = (bodyC[1] - (t.iy + 0.5)) / 3.1;
+    const col = up > 0.2 ? oranges[Math.floor(h * 3) % 3] : copper;
+    mark(t, col, MAT_GLASS);
+  }
+  stampEllipse(bodyC[0], bodyC[1], 9.45, 4.15, rot, (t) => mark(t, blue, MAT_GLASS));
+  stampEllipse(34.8, 37.4, 3.65, 3.05, rot, (t) => mark(t, blue, MAT_GLASS));
+  stampCapsule(19.6, 37.6, 14.4, 34.4, 1.9, (t) => mark(t, blue, MAT_GLASS));
+  stampCapsule(19.6, 38.6, 14.6, 42.2, 1.8, (t) => mark(t, blue, MAT_GLASS));
+  stampCapsule(24.2, 35.4, 30.8, 32.8, 1.6, (t) => mark(t, blue, MAT_GLASS));
+  stampCapsule(31.8, 39.8, 28.0, 43.0, 1.4, (t) => mark(t, blue, MAT_GLASS));
+  stampEllipse(bodyC[0], bodyC[1], 8.4, 3.05, rot, (t) => paintBodyTile(t));
+  stampEllipse(34.8, 37.4, 2.7, 2.15, rot, (t) => paintBodyTile(t));
+  stampCapsule(19.6, 37.6, 15.2, 35.2, 1.15, (t) => paintBodyTile(t));
+  stampCapsule(19.6, 38.6, 15.4, 41.2, 1.05, (t) => paintBodyTile(t));
+  stampCapsule(24.5, 35.2, 30.5, 33.6, 0.9, (t) => paintBodyTile(t));
+  stampCapsule(31.5, 39.6, 28.6, 42.0, 0.72, (t) => paintBodyTile(t));
+  stampEllipse(36.2, 36.9, 0.58, 0.5, 0, (t) => mark(t, [0.08, 0.05, 0.04], MAT_DARK));
+}
+
+function paintBird(o) {
+  const white = o.white;
+  const tip = o.tip;
+  const beak = o.beak;
+  const flock = o.flock;
+  function bodyTile(t, mat, col, wing) {
+    t.flock = flock;
+    t.mat = mat;
+    t.day = vary(col, 0.045, t.seed);
+    if (wing !== undefined) t.wing = wing;
+  }
+  stampBezier(o.wingUp[0], o.wingUp[1], o.wingUp[2], o.wingR, (t, tt) => {
+    const prim = tt > 0.74;
+    bodyTile(t, prim ? MAT_DARK : MAT_GLASS, prim ? tip : white, (0.18 + 0.82 * tt));
+  });
+  stampBezier(o.wingDn[0], o.wingDn[1], o.wingDn[2], o.wingR * 0.92, (t, tt) => {
+    const prim = tt > 0.74;
+    bodyTile(t, prim ? MAT_DARK : MAT_GLASS, prim ? tip : white, -(0.18 + 0.82 * tt));
+  });
+  if (o.tail) {
+    stampCapsule(o.tail[0][0], o.tail[0][1], o.tail[1][0], o.tail[1][1], o.tailR || 0.8, (t) => {
+      bodyTile(t, MAT_GLASS, white, 0);
+    });
+  }
+  stampEllipse(o.body[0], o.body[1], o.body[2], o.body[3], o.body[4] || 0, (t) => {
+    bodyTile(t, MAT_GLASS, white, 0);
+  });
+  stampBezier(o.neck[0], o.neck[1], o.neck[2], o.neckR, (t) => {
+    bodyTile(t, MAT_GLASS, white, 0);
+  });
+  stampEllipse(o.head[0], o.head[1], o.head[2], o.head[2] * 0.92, 0, (t) => {
+    bodyTile(t, MAT_GLASS, white, 0);
+  });
+  stampCapsule(o.beakL[0], o.beakL[1], o.beakL[2], o.beakL[3], o.beakR, (t) => {
+    bodyTile(t, MAT_GOLD, beak, 0);
+  });
+  if (o.crown) {
+    stampEllipse(o.crown[0], o.crown[1], o.crown[2], o.crown[2], 0, (t) => {
+      bodyTile(t, MAT_GLASS, [0.78, 0.09, 0.07], 0);
+    });
+  }
+  if (o.legs) {
+    stampCapsule(o.legs[0], o.legs[1], o.legs[2], o.legs[3], 0.38, (t) => {
+      bodyTile(t, MAT_DARK, [0.10, 0.08, 0.07], 0);
+    });
+  }
+  stampEllipse(o.eye[0], o.eye[1], 0.62, 0.55, 0, (t) => {
+    bodyTile(t, MAT_DARK, [0.05, 0.045, 0.04], 0);
+  });
+}
+
+paintFish();
+
+paintBird({
+  flock: F_C1,
+  white: [0.96, 0.94, 0.89],
+  tip: [0.06, 0.055, 0.05],
+  beak: [0.92, 0.68, 0.20],
+  body: [11.6, 17.2, 3.35, 1.85, -0.2],
+  neck: [[13.8, 16.2], [17.2, 12.2], [20.4, 10.8]],
+  neckR: 0.82,
+  head: [20.8, 10.5, 1.12],
+  beakL: [21.7, 10.35, 23.6, 10.05],
+  beakR: 0.34,
+  crown: [20.6, 9.25, 0.55],
+  eye: [21.3, 10.35],
+  wingUp: [[10.4, 15.8], [6.2, 9.6], [4.0, 13.2]],
+  wingDn: [[10.6, 18.4], [6.0, 24.2], [3.9, 21.6]],
+  wingR: 1.28,
+  tail: [[8.6, 18.0], [5.2, 19.4]],
+  tailR: 0.72,
+  legs: [11.0, 18.8, 9.0, 22.6]
+});
+
+paintBird({
+  flock: F_C2,
+  white: [0.95, 0.93, 0.88],
+  tip: [0.07, 0.06, 0.055],
+  beak: [0.90, 0.64, 0.18],
+  body: [36.8, 20.2, 3.2, 1.8, 0.15],
+  neck: [[34.6, 19.2], [30.8, 15.4], [28.0, 14.4]],
+  neckR: 0.78,
+  head: [27.5, 14.15, 1.08],
+  beakL: [26.6, 14.0, 24.8, 13.75],
+  beakR: 0.32,
+  crown: [27.6, 12.95, 0.52],
+  eye: [27.0, 14.0],
+  wingUp: [[38.0, 18.8], [42.6, 13.2], [44.8, 16.4]],
+  wingDn: [[37.8, 21.4], [42.8, 26.6], [44.6, 24.2]],
+  wingR: 1.22,
+  tail: [[39.4, 21.0], [42.6, 22.4]],
+  tailR: 0.7,
+  legs: [36.6, 21.8, 38.8, 25.6]
+});
+
+paintBird({
+  flock: F_DOVE,
+  white: [0.97, 0.95, 0.92],
+  tip: [0.58, 0.56, 0.54],
+  beak: [0.90, 0.58, 0.55],
+  body: [24.0, 6.7, 1.75, 1.05, -0.05],
+  neck: [[25.3, 6.4], [26.3, 5.9], [26.9, 5.85]],
+  neckR: 0.55,
+  head: [27.2, 5.75, 0.82],
+  beakL: [27.8, 5.65, 29.2, 5.45],
+  beakR: 0.28,
+  crown: null,
+  eye: [27.45, 5.6],
+  wingUp: [[23.2, 6.1], [20.4, 4.0], [18.4, 5.2]],
+  wingDn: [[23.4, 7.3], [20.2, 9.4], [18.6, 8.3]],
+  wingR: 0.82,
+  tail: [[22.4, 7.0], [20.0, 7.5]],
+  tailR: 0.5,
+  legs: null
+});
+
+eachTile((t) => {
+  const b = 2;
+  const edge = t.ix < b || t.iy < b || t.ix >= N - b || t.iy >= N - b;
+  if (!edge) return;
+  const outer = t.ix === 0 || t.iy === 0 || t.ix === N - 1 || t.iy === N - 1;
+  const corner = (t.ix < 4 && t.iy < 4) || (t.ix < 4 && t.iy >= N - 4) ||
+    (t.ix >= N - 4 && t.iy < 4) || (t.ix >= N - 4 && t.iy >= N - 4);
+  t.flock = F_NONE;
+  t.wing = 0;
+  t.sun = false;
+  if (corner && !outer) {
+    t.mat = MAT_GOLD;
+    t.day = vary([0.95, 0.78, 0.36], 0.04, t.seed);
+  } else if ((t.ix + t.iy) % 2 === 0) {
+    t.mat = MAT_GLASS;
+    t.day = vary([0.12, 0.16, 0.46], 0.04, t.seed);
+  } else {
+    t.mat = MAT_GLASS;
+    t.day = vary([0.42, 0.07, 0.12], 0.04, t.seed);
+  }
+  t.night = navyOf(t.seed);
+});
+
+function crescent(ix, iy) {
+  const dx = ix + 0.5 - 40.2;
+  const dy = iy + 0.5 - 8.4;
+  const outer = dx * dx + dy * dy < 4.7 * 4.7;
+  const dx2 = ix + 0.5 - 42.3;
+  const dy2 = iy + 0.5 - 7.2;
+  const inner = dx2 * dx2 + dy2 * dy2 < 4.05 * 4.05;
+  return outer && !inner;
+}
+eachTile((t) => {
+  if (t.flock !== F_NONE) return;
+  if (t.ix < 2 || t.iy < 2 || t.ix >= N - 2 || t.iy >= N - 2) return;
+  if (!crescent(t.ix, t.iy)) return;
+  if (t.iy + 0.5 > seaLine(t.ix)) return;
+  t.flag = 3;
+  t.night = vary([0.96, 0.90, 0.72], 0.04, t.seed);
+});
+
+const starSlots = [];
+function addCluster(x, y, n, spread, flag) {
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2 + 0.35;
+    const rr = spread * (0.28 + 0.72 * ((i * 0.618) % 1));
+    starSlots.push({ x: x + Math.cos(a) * rr, y: y + Math.sin(a) * rr, flag });
+  }
+}
+function addLine(x0, y0, x1, y1, step) {
+  const d = Math.hypot(x1 - x0, y1 - y0);
+  const n = Math.max(1, Math.floor(d / step));
+  for (let i = 1; i < n; i++) {
+    const t = i / n;
+    starSlots.push({
+      x: x0 + (x1 - x0) * t,
+      y: y0 + (y1 - y0) * t,
+      flag: 2
+    });
+  }
+}
+const Deneb = [0.02, 0.58];
+const Sadr = [0.00, 0.20];
+const Gienah = [-0.50, 0.24];
+const DeltaC = [0.52, 0.14];
+const Albireo = [0.10, -0.16];
+addCluster(Deneb[0], Deneb[1], 7, 0.042, 1);
+addCluster(Sadr[0], Sadr[1], 6, 0.036, 1);
+addCluster(Gienah[0], Gienah[1], 5, 0.032, 1);
+addCluster(DeltaC[0], DeltaC[1], 5, 0.032, 1);
+addCluster(Albireo[0], Albireo[1], 6, 0.034, 1);
+addLine(Deneb[0], Deneb[1], Sadr[0], Sadr[1], 0.07);
+addLine(Sadr[0], Sadr[1], Gienah[0], Gienah[1], 0.075);
+addLine(Sadr[0], Sadr[1], DeltaC[0], DeltaC[1], 0.075);
+addLine(Sadr[0], Sadr[1], Albireo[0], Albireo[1], 0.07);
+
+const starCands = tiles.filter((t) => {
+  if (t.flock !== F_NONE || t.flag === 3 || t.sun) return false;
+  if (t.ix < 3 || t.iy < 3 || t.ix >= N - 3 || t.iy >= N - 3) return false;
+  if (t.iy + 0.5 > seaLine(t.ix) - 1) return false;
+  return t.mat === MAT_GOLD;
+});
+starCands.sort((a, b) => a.ix - b.ix || a.iy - b.iy);
+for (let i = starCands.length - 1; i > 0; i--) {
+  const j = Math.floor(hash2(i * 1.7, 4.2) * (i + 1)) % (i + 1);
+  const tmp = starCands[i];
+  starCands[i] = starCands[j];
+  starCands[j] = tmp;
+}
+const starCount = Math.min(starSlots.length, starCands.length);
+for (let i = 0; i < starCount; i++) {
+  const t = starCands[i];
+  const s = starSlots[i];
+  t.flock = F_STAR;
+  t.flag = s.flag;
+  t.tx = s.x;
+  t.ty = s.y;
+  t.tail = hash2(t.ix * 2.2, t.iy * 1.4);
+  t.night = s.flag === 1
+    ? vary([0.95, 0.96, 1.0], 0.03, t.seed)
+    : vary([0.55, 0.60, 0.72], 0.04, t.seed);
+}
+
+function worldOf(gx, gy) {
+  const x = ((gx) / N) * 2 - 1;
+  const y = 1 - ((gy) / N) * 2;
+  return [x, y];
+}
+function headingOf(from, to) {
+  const a = worldOf(from[0], from[1]);
+  const b = worldOf(to[0], to[1]);
+  return Math.atan2(b[1] - a[1], b[0] - a[0]);
+}
+function toLocal(x, y, cx, cy, h) {
+  const dx = x - cx, dy = y - cy;
+  const c = Math.cos(h), s = Math.sin(h);
+  return [c * dx + s * dy, -s * dx + c * dy];
+}
+function finalize(flock, heading) {
+  let sx = 0, sy = 0, n = 0;
+  for (const t of tiles) if (t.flock === flock) { sx += t.x; sy += t.y; n++; }
+  if (!n) return { c: [0, 0], h: heading, n: 0 };
+  const cx = sx / n, cy = sy / n;
+  let maxX = 0.001;
+  for (const t of tiles) if (t.flock === flock) {
+    const l = toLocal(t.x, t.y, cx, cy, heading);
+    t.lx = l[0];
+    t.ly = l[1];
+    maxX = Math.max(maxX, Math.abs(l[0]));
+  }
+  for (const t of tiles) if (t.flock === flock) {
+    t.tail = clamp(0.5 - t.lx / (maxX * 2), 0, 1);
+  }
+  return { c: [cx, cy], h: heading, n };
+}
+
+const fishInfo = finalize(F_FISH, headingOf([27.2, 38.0], [34.8, 37.4]));
+const c1Info = finalize(F_C1, headingOf([11.6, 17.2], [20.8, 10.5]));
+const c2Info = finalize(F_C2, headingOf([36.8, 20.2], [27.5, 14.15]));
+const doveInfo = finalize(F_DOVE, headingOf([24.0, 6.7], [27.2, 5.75]));
+
+let lastTile = null;
+let lastD = 1e9;
+eachTile((t) => {
+  if (t.flock !== F_NONE || t.flag !== 0) return;
+  if (t.ix < 3 || t.iy < 3 || t.ix >= N - 3 || t.iy >= N - 3) return;
+  if (t.mat !== MAT_GOLD) return;
+  const d = t.x * t.x + (t.y - 0.08) * (t.y - 0.08);
+  if (d < lastD) { lastD = d; lastTile = t; }
+});
+if (lastTile) lastTile.flag = 10;
+
+const clickBuckets = new Map();
+function pushClick(t, gain, rate) {
+  const key = Math.round(t * 16);
+  const prev = clickBuckets.get(key);
+  if (!prev || gain > prev.gain) clickBuckets.set(key, { t, gain, rate });
+}
+function addLandings(flock, land1, delayScale, gain, rate0) {
+  for (const t of tiles) if (t.flock === flock) {
+    pushClick(
+      land1 + t.tail * delayScale,
+      gain,
+      rate0 + ((t.seed * 1.7) % 1) * 0.35
+    );
+  }
+}
+addLandings(F_FISH, 19.85, 0.22, 0.05, 0.9);
+addLandings(F_C1, 33.15, 0.14, 0.05, 0.86);
+addLandings(F_C2, 33.45, 0.12, 0.05, 0.88);
+addLandings(F_DOVE, 32.85, 0.08, 0.048, 1.05);
+for (const t of tiles) if (t.flock === F_STAR) {
+  const d = t.tail;
+  pushClick(45.8 + d * 0.45, 0.04, 1.2 + d * 0.25);
+  pushClick(56.9 + d * 0.28, 0.042, 1.05 + (1 - d) * 0.2);
+}
+for (const t of tiles) {
+  if (((t.ix * 5 + t.iy * 3) % 7) !== 0) continue;
+  const rad = Math.hypot(t.x, t.y);
+  pushClick(67.15 + rad * 2.55 + 0.55, 0.036, 0.85 + (t.seed % 1) * 0.35);
+}
+if (lastTile) pushClick(76.2, 0.08, 1.05);
+const clicks = [...clickBuckets.values()].sort((a, b) => a.t - b.t);
+
+const fishKeys = [
+  [8.0, 0, 0, 0],
+  [10.0, 0, 0.04, 0.36],
+  [12.6, -0.34, 0.48, 0.44],
+  [14.6, 0.30, 0.58, 0.48],
+  [16.0, 0.08, 0.68, 0.26],
+  [17.4, 0.0, 0.14, 0.16],
+  [18.55, 0, 0, 0]
+];
+const c1Keys = [
+  [21.0, 0, 0, 0],
+  [22.7, 0, 0.03, 0.40],
+  [25.2, 0.36, 0.26, 0.50],
+  [27.8, 0.66, 0.00, 0.48],
+  [30.2, 0.18, -0.10, 0.26],
+  [31.7, 0, 0, 0.05],
+  [33.15, 0, 0, 0]
+];
+const c2Keys = [
+  [21.45, 0, 0, 0],
+  [23.1, 0, 0.02, 0.40],
+  [25.7, -0.42, 0.30, 0.52],
+  [28.3, -0.78, 0.04, 0.46],
+  [30.6, -0.22, -0.08, 0.24],
+  [32.0, 0, 0, 0.05],
+  [33.45, 0, 0, 0]
+];
+const doveKeys = [
+  [22.05, 0, 0, 0],
+  [23.15, 0, 0.02, 0.26],
+  [25.2, 0.22, -0.06, 0.34],
+  [27.4, 0.05, -0.22, 0.30],
+  [29.6, -0.18, -0.08, 0.24],
+  [31.4, -0.04, 0, 0.05],
+  [32.85, 0, 0, 0]
+];
+
+function packKeys(keys) {
+  const a = new Float32Array(28);
+  for (let i = 0; i < 7; i++) {
+    a[i * 4] = keys[i][1];
+    a[i * 4 + 1] = keys[i][2];
+    a[i * 4 + 2] = keys[i][3];
+    a[i * 4 + 3] = keys[i][0];
+  }
+  return a;
+}
+
+const vertSrc = `#version 300 es
+precision highp float;
+
+layout(location=0) in vec3 a_corner;
+layout(location=1) in vec3 a_nrm;
+layout(location=2) in vec2 a_uv;
+layout(location=3) in float a_face;
+layout(location=4) in vec2 a_home;
+layout(location=5) in vec2 a_local;
+layout(location=6) in vec3 a_day;
+layout(location=7) in vec3 a_night;
+layout(location=8) in vec4 a_meta;
+layout(location=9) in vec2 a_target;
+layout(location=10) in float a_seed;
+layout(location=11) in float a_flag;
+
+uniform float u_time;
+uniform float u_grid;
+uniform vec2 u_fishHome;
+uniform vec2 u_c1Home;
+uniform vec2 u_c2Home;
+uniform vec2 u_doveHome;
+uniform float u_fishH;
+uniform float u_c1H;
+uniform float u_c2H;
+uniform float u_doveH;
+uniform vec4 u_fish[7];
+uniform vec4 u_c1[7];
+uniform vec4 u_c2[7];
+uniform vec4 u_dove[7];
+uniform vec2 u_splash;
+
+out vec3 v_world;
+out vec3 v_nrm;
+out vec3 v_day;
+out vec3 v_night;
+out vec2 v_uv;
+out float v_face;
+out float v_mat;
+out float v_seed;
+out float v_flag;
+out float v_flash;
+out vec3 v_cam;
+
+const float PI = 3.14159265;
+const float TAU = 6.28318530;
+
+vec3 rotX(vec3 p, float a) {
+  float c = cos(a), s = sin(a);
+  return vec3(p.x, c * p.y - s * p.z, s * p.y + c * p.z);
+}
+vec3 rotY(vec3 p, float a) {
+  float c = cos(a), s = sin(a);
+  return vec3(c * p.x + s * p.z, p.y, -s * p.x + c * p.z);
+}
+vec3 rotZ(vec3 p, float a) {
+  float c = cos(a), s = sin(a);
+  return vec3(c * p.x - s * p.y, s * p.x + c * p.y, p.z);
+}
+
+vec3 catmull(vec3 p0, vec3 p1, vec3 p2, vec3 p3, float u) {
+  float u2 = u * u, u3 = u2 * u;
+  return 0.5 * ((2.0 * p1) + (-p0 + p2) * u + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * u2
+    + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * u3);
+}
+
+vec3 evalPath(vec4 k[7], float t) {
+  if (t <= k[0].w) return k[0].xyz;
+  if (t >= k[6].w) return k[6].xyz;
+  for (int i = 0; i < 6; i++) {
+    if (t <= k[i + 1].w) {
+      float u = clamp((t - k[i].w) / max(k[i + 1].w - k[i].w, 1e-3), 0.0, 1.0);
+      int i0 = i - 1; if (i0 < 0) i0 = 0;
+      int i3 = i + 2; if (i3 > 6) i3 = 6;
+      return catmull(k[i0].xyz, k[i].xyz, k[i + 1].xyz, k[i3].xyz, u);
+    }
+  }
+  return k[6].xyz;
+}
+
+float angMix(float a, float b, float t) {
+  float d = mod(b - a + PI, TAU) - PI;
+  return a + d * t;
+}
+
+vec3 cameraPos(float T) {
+  float z = 3.08;
+  float sp = smoothstep(63.0, 66.7, T) * (1.0 - smoothstep(69.2, 73.2, T));
+  z += sp * 2.15;
+  float x = sin(T * 0.09) * 0.018;
+  float y = sin(T * 0.06 + 0.8) * 0.010;
+  return vec3(x, y, z);
+}
+
+vec4 project(vec3 world, vec3 cam, float T) {
+  vec3 target = vec3(0.0, 0.0, 0.0);
+  vec3 f = normalize(target - cam);
+  float sp = smoothstep(63.0, 66.7, T) * (1.0 - smoothstep(69.2, 73.2, T));
+  float roll = sp * 0.07 * sin(T * 0.55);
+  vec3 up = vec3(-sin(roll), cos(roll), 0.0);
+  vec3 r = normalize(cross(f, up));
+  vec3 u = cross(r, f);
+  vec3 rel = world - cam;
+  vec3 view = vec3(dot(rel, r), dot(rel, u), dot(rel, -f));
+  float focal = 1.0 / tan(radians(18.4));
+  float near = 0.08;
+  float far = 40.0;
+  return vec4(
+    view.x * focal,
+    view.y * focal,
+    view.z * (far + near) / (near - far) + (2.0 * far * near) / (near - far),
+    -view.z
+  );
+}
+
+float nightAngle(float T, float x) {
+  float delay = (x * 0.5 + 0.5) * 1.65;
+  float s1 = smoothstep(34.05 + delay, 36.55 + delay, T);
+  float s2 = smoothstep(58.05 + delay, 60.45 + delay, T);
+  return (s1 + s2) * PI;
+}
+
+void main() {
+  float T = mod(u_time, 80.0);
+  float flock = a_meta.x;
+  float mat = a_meta.y;
+  float tail = a_meta.z;
+  float wing = a_meta.w;
+  float seed = a_seed;
+
+  float cell = 2.0 / u_grid;
+  float jx = 0.90 + 0.07 * fract(seed * 7.17);
+  float jy = 0.90 + 0.07 * fract(seed * 13.31 + 0.4);
+  vec3 lp = a_corner;
+  lp.x *= cell * 0.5 * jx;
+  lp.y *= cell * 0.5 * jy;
+  lp.z *= cell * 0.5 * 0.55;
+
+  vec2 pos = a_home;
+  float z = 0.0;
+  float spinX = 0.0;
+  float activity = 0.0;
+  float flash = 0.0;
+  float lean = 0.0;
+
+  float sweep = mix(-1.45, 1.45, smoothstep(0.35, 7.5, T));
+  float band = exp(-pow((a_home.x - sweep) * 2.15, 2.0));
+  float ripEnv = smoothstep(0.15, 0.7, T) * smoothstep(8.6, 7.15, T);
+  float rip = sin(a_home.x * 16.0 + a_home.y * 7.0 - T * 6.2 + seed * 6.0) * band;
+  float ripZ = rip * 0.05 * ripEnv;
+  float wobble = rip * 0.42 * ripEnv;
+  float ringT = (T - 2.1) * 1.55;
+  float ring = exp(-pow(length(a_home) * 3.4 - ringT, 2.0));
+  float ringEnv = smoothstep(1.6, 2.3, T) * smoothstep(7.2, 5.2, T);
+  ripZ += ring * ringEnv * 0.035;
+  wobble += ring * ringEnv * 0.25;
+
+  vec2 homeC = a_home;
+  float restH = 0.0;
+  float t0 = 0.0, takeEnd = 0.0, land0 = 0.0, land1 = 0.0, dly = 0.0;
+  float flapW = 0.0, swim0 = 0.0, swim1 = 0.0, leapT = 50.0;
+  bool bird = false;
+  bool mover = false;
+  vec3 path = vec3(0.0);
+  vec3 ahead = vec3(0.0);
+
+  if (flock > 0.5 && flock < 1.5) {
+    mover = true;
+    homeC = u_fishHome;
+    restH = u_fishH;
+    t0 = 8.0; takeEnd = 9.25; land0 = 18.45; land1 = 19.85; dly = 0.22;
+    swim0 = 10.15; swim1 = 17.7; leapT = 15.85; flapW = 0.0;
+    path = evalPath(u_fish, T);
+    ahead = evalPath(u_fish, T + 0.08);
+  } else if (flock > 1.5 && flock < 2.5) {
+    mover = true; bird = true;
+    homeC = u_c1Home;
+    restH = u_c1H;
+    t0 = 21.0; takeEnd = 22.35; land0 = 31.55; land1 = 33.15; dly = 0.14;
+    swim0 = 22.6; swim1 = 31.3; flapW = 7.4;
+    path = evalPath(u_c1, T);
+    ahead = evalPath(u_c1, T + 0.08);
+  } else if (flock > 2.5 && flock < 3.5) {
+    mover = true; bird = true;
+    homeC = u_c2Home;
+    restH = u_c2H;
+    t0 = 21.45; takeEnd = 22.85; land0 = 31.9; land1 = 33.45; dly = 0.12;
+    swim0 = 23.1; swim1 = 31.6; flapW = 7.1;
+    path = evalPath(u_c2, T);
+    ahead = evalPath(u_c2, T + 0.08);
+  } else if (flock > 3.5 && flock < 4.5) {
+    mover = true; bird = true;
+    homeC = u_doveHome;
+    restH = u_doveH;
+    t0 = 22.05; takeEnd = 23.15; land0 = 31.35; land1 = 32.85; dly = 0.08;
+    swim0 = 23.2; swim1 = 31.2; flapW = 16.5;
+    path = evalPath(u_dove, T);
+    ahead = evalPath(u_dove, T + 0.08);
+  }
+
+  if (mover) {
+    float delay = tail * dly;
+    float takeoff = smoothstep(t0 + delay, takeEnd + delay, T);
+    float land = smoothstep(land0 + delay, land1 + delay, T);
+    float w = takeoff * (1.0 - land);
+    activity = w;
+    float swim = smoothstep(swim0, swim0 + 0.7, T) * (1.0 - smoothstep(swim1, swim1 + 0.8, T));
+    vec2 vel = ahead.xy - path.xy;
+    float spd = length(vel);
+    float hPath = atan(vel.y, vel.x);
+    float h = angMix(restH, hPath, smoothstep(0.004, 0.03, spd));
+    vec2 fwd = vec2(cos(h), sin(h));
+    vec2 side = vec2(-sin(h), cos(h));
+    float und = 0.0;
+    float flap = 0.0;
+    if (!bird) {
+      und = sin(a_local.x * 14.0 - T * 6.0) * mix(0.002, 0.022, tail) * swim;
+    } else {
+      float phase = flock * 1.7;
+      flap = sin(T * flapW + phase) * wing * (flock > 3.5 ? 0.016 : 0.026) * swim;
+    }
+    float leap = exp(-pow((T - leapT) * 1.05, 2.0));
+    float spread = 1.0 + swim * 0.02 + leap * 0.04;
+    vec2 loc = vec2(a_local.x, a_local.y + und + flap) * spread;
+    vec2 posed = homeC + path.xy + fwd * loc.x + side * loc.y;
+    posed = clamp(posed, vec2(-0.86), vec2(0.86));
+    float posedZ = path.z;
+    if (!bird) posedZ += sin(a_local.x * 14.0 - T * 6.0 + 1.1) * tail * 0.012 * swim;
+    else posedZ += abs(wing) * abs(sin(T * flapW + flock)) * 0.016 * swim;
+    posedZ += (seed - 0.5) * 0.008 * swim;
+    pos = mix(a_home, posed, w);
+    z = mix(0.0, posedZ, w);
+    z += sin(land * PI) * 0.015;
+    spinX = sin(takeoff * PI) * 0.28 + sin(land * PI) * 0.22;
+    lean = angMix(0.0, h - restH, 0.05 * w);
+    flash += exp(-pow((land - 0.72) * 9.0, 2.0));
+    wobble *= (1.0 - w);
+    ripZ *= (1.0 - w);
+  }
+
+  if (flock > 4.5 && flock < 5.5) {
+    float d = tail * 1.05;
+    float go = smoothstep(40.35 + d, 45.6 + d * 0.35, T);
+    float back = smoothstep(52.4 + d * 0.3, 56.85 + d * 0.22, T);
+    float u = clamp(go * (1.0 - back), 0.0, 1.0);
+    float slide = smoothstep(0.12, 1.0, u);
+    float swarm = sin(clamp(u, 0.0, 1.0) * PI);
+    vec2 wander = vec2(
+      sin(T * 1.6 + seed * 19.0) + 0.6 * sin(T * 2.7 + a_home.y * 9.0),
+      cos(T * 1.35 + seed * 11.0) + 0.6 * cos(T * 2.3 + a_home.x * 8.0)
+    ) * 0.075 * swarm;
+    pos = mix(a_home, a_target, slide) + wander;
+    z = sin(u * PI) * 0.42 + u * 0.07;
+    z += smoothstep(39.5, 40.5, T) * (1.0 - smoothstep(40.6, 41.8, T)) * (0.02 + 0.025 * sin(T * 16.0 + seed * 30.0));
+    spinX = sin(u * PI) * (2.5 + fract(seed * 4.0) * 3.5);
+    activity = u;
+    flash += exp(-pow((go - 0.94) * 16.0, 2.0));
+    flash += exp(-pow((back - 0.92) * 14.0, 2.0));
+    wobble *= (1.0 - smoothstep(0.0, 0.2, u));
+    ripZ *= (1.0 - smoothstep(0.0, 0.2, u));
+  }
+
+  z += ripZ;
+  float nA = nightAngle(T, a_home.x);
+  z += abs(sin(nA)) * 0.042 * (1.0 - smoothstep(62.5, 63.4, T));
+
+  if (T > 16.35 && T < 19.15 && flock < 0.5 && a_home.y < 0.08) {
+    float d = length(a_home - u_splash);
+    float rt = (T - 16.55) * 2.05;
+    float spl = exp(-pow(d * 6.5 - rt, 2.0));
+    z += spl * 0.075;
+    wobble += spl * 0.55;
+    flash += spl * 0.35;
+  }
+
+  float spFlash = 0.0;
+  if (T > 62.65 && T < 73.4) {
+    float rad = length(a_home);
+    float ang = atan(a_home.y, a_home.x);
+    float snapStart = 67.15 + rad * 2.55;
+    float s = clamp((T - snapStart) / 0.62, 0.0, 1.0);
+    float tGone = clamp(T, 63.0, snapStart);
+    float outP = smoothstep(63.0, 66.55, tGone);
+    float spinRate = mix(3.15, 0.38, smoothstep(0.02, 1.15, rad));
+    float spin = max(tGone - 63.0, 0.0) * spinRate;
+    float rad2 = rad * (1.0 + outP * 0.06);
+    vec2 gone = vec2(cos(ang + spin), sin(ang + spin)) * rad2;
+    gone += vec2(sin(seed * 12.2), cos(seed * 8.4)) * 0.028 * outP * (1.0 - s);
+    float c1 = 1.25;
+    float c3 = c1 + 1.0;
+    float backP = 1.0 + c3 * pow(s - 1.0, 3.0) + c1 * pow(s - 1.0, 2.0);
+    if (s <= 0.0) backP = 0.0;
+    if (s >= 1.0) backP = 1.0;
+    pos = mix(gone, a_home, backP);
+    float zGone = outP * (0.10 + 0.34 * rad);
+    z = mix(zGone, 0.0, clamp(backP, 0.0, 1.0));
+    spinX = 0.0;
+    wobble = 0.0;
+    activity = max(activity, outP * (1.0 - s));
+    lean = spin * 0.08 * (1.0 - s);
+    spFlash = exp(-pow((s - 0.62) * 7.0, 2.0));
+    flash = spFlash;
+  }
+
+  float lastA = 0.0;
+  float lastScale = 1.0;
+  if (a_flag > 9.5) {
+    float s = smoothstep(75.05, 76.2, T);
+    lastA = s * TAU;
+    float wink = sin(s * PI);
+    flash += wink;
+    z += wink * 0.18;
+    lastScale = 1.0 + wink * 1.15;
+  }
+
+  float micro = (fract(seed * 4.17) - 0.5) * 0.11 * (1.0 - activity) + lean;
+  float pop = (1.0 + flash * 0.05) * lastScale;
+
+  vec3 p = lp * pop;
+  vec3 nrm = a_nrm;
+  if (a_face < 1.5) {
+    nrm.xy += (vec2(fract(seed * 3.11), fract(seed * 5.73)) - 0.5) * 0.85;
+    nrm = normalize(nrm);
+  }
+  p = rotZ(p, micro);
+  nrm = rotZ(nrm, micro);
+  p = rotX(p, spinX + wobble);
+  nrm = rotX(nrm, spinX + wobble);
+  p = rotY(p, nA + lastA);
+  nrm = rotY(nrm, nA + lastA);
+  p.xy += pos;
+  p.z += z;
+
+  vec3 cam = cameraPos(T);
+  v_world = p;
+  v_nrm = normalize(nrm);
+  v_day = a_day;
+  v_night = a_night;
+  v_uv = a_uv;
+  v_face = a_face;
+  v_mat = mat;
+  v_seed = seed;
+  v_flag = a_flag;
+  v_flash = flash;
+  v_cam = cam;
+  gl_Position = project(p, cam, T);
+}
+`;
+
+const fragSrc = `#version 300 es
+precision highp float;
+
+in vec3 v_world;
+in vec3 v_nrm;
+in vec3 v_day;
+in vec3 v_night;
+in vec2 v_uv;
+in float v_face;
+in float v_mat;
+in float v_seed;
+in float v_flag;
+in float v_flash;
+in vec3 v_cam;
+
+uniform float u_time;
+uniform vec2 u_res;
+
+out vec4 fragColor;
+
+const float PI = 3.14159265;
+const float TAU = 6.28318530;
+
+float hash21(vec2 p) {
+  p = fract(p * vec2(123.34, 345.45));
+  p += dot(p, p + 34.345);
+  return fract(p.x * p.y);
+}
+float vnoise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  float a = hash21(i);
+  float b = hash21(i + vec2(1.0, 0.0));
+  float c = hash21(i + vec2(0.0, 1.0));
+  float d = hash21(i + vec2(1.0, 1.0));
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+vec3 camPos(float T) {
+  float z = 3.08;
+  float sp = smoothstep(63.0, 66.7, T) * (1.0 - smoothstep(69.2, 73.2, T));
+  z += sp * 2.15;
+  return vec3(sin(T * 0.09) * 0.018, sin(T * 0.06 + 0.8) * 0.010, z);
+}
+
+float nightAmt(float T) {
+  return smoothstep(35.2, 39.2, T) * (1.0 - smoothstep(58.4, 62.0, T));
+}
+
+float fadeOf(float T) {
+  return smoothstep(0.0, 1.7, T) * smoothstep(80.0, 76.55, T);
+}
+
+void main() {
+  float T = mod(u_time, 80.0);
+  float night = nightAmt(T);
+  vec3 N = normalize(v_nrm);
+  vec3 V = normalize(v_cam - v_world);
+  vec3 L = normalize(mix(vec3(-0.32, 0.58, 0.74), vec3(-0.15, 0.35, 0.88), night));
+  vec3 H = normalize(L + V);
+  float ndl = max(dot(N, L), 0.0);
+  float ndv = max(dot(N, V), 0.0);
+  float ndh = max(dot(N, H), 0.0);
+  float fres = pow(1.0 - ndv, 3.2);
+
+  bool back = v_face > 0.5 && v_face < 1.5;
+  bool side = v_face > 1.5;
+  bool star = v_flag > 0.5 && v_flag < 2.5;
+  bool moon = v_flag > 2.5 && v_flag < 3.5;
+  float starDim = v_flag > 1.5 && v_flag < 2.5 ? 0.55 : 1.0;
+
+  vec3 day = pow(max(v_day, vec3(0.0)), vec3(2.2));
+  vec3 nightC = pow(max(v_night, vec3(0.0)), vec3(2.2));
+
+  float flake = vnoise(v_uv * vec2(5.5, 8.0) + v_seed * 4.0);
+  float flake2 = vnoise(v_uv * vec2(16.0, 21.0) + v_seed * 2.0);
+  float edge = min(min(v_uv.x, 1.0 - v_uv.x), min(v_uv.y, 1.0 - v_uv.y));
+  float bevel = smoothstep(0.0, 0.14, edge);
+
+  vec3 albedo;
+  float metal = 0.0;
+  float rough = 0.35;
+  float emit = 0.0;
+
+  if (side) {
+    vec3 dayEdge = day * vec3(0.28, 0.18, 0.10);
+    vec3 nightEdge = nightC * vec3(0.75, 0.9, 1.05);
+    albedo = mix(dayEdge, nightEdge, night);
+    metal = 0.08;
+    rough = 0.55;
+  } else if (back && star) {
+    albedo = nightC;
+    metal = 0.72;
+    rough = 0.16;
+    float tw = 0.72 + 0.28 * sin(T * 2.7 + v_seed * 42.0);
+    tw *= 0.85 + 0.15 * sin(T * 5.1 + v_seed * 17.0);
+    emit = (1.15 * starDim) * tw;
+  } else if (back && moon) {
+    albedo = nightC;
+    metal = 0.55;
+    rough = 0.22;
+    emit = 0.42 + 0.06 * sin(T * 0.8 + v_seed);
+  } else if (back) {
+    float teal = clamp((nightC.g - nightC.r) * 14.0, 0.0, 1.0);
+    albedo = nightC * mix(vec3(0.9), vec3(0.65, 1.45, 1.3), teal);
+    albedo *= (0.9 + 0.15 * flake2);
+    metal = 0.03;
+    rough = 0.2;
+    emit = 0.02 + teal * 0.2;
+  } else if (v_mat < 0.5) {
+    vec3 lo = day * vec3(0.72, 0.62, 0.45);
+    vec3 hi = day * vec3(1.15, 1.05, 0.85);
+    albedo = mix(lo, hi, flake);
+    albedo *= mix(vec3(1.0), vec3(1.08, 0.92, 0.62), flake2 * 0.65);
+    metal = 0.94;
+    rough = mix(0.42, 0.22, flake);
+    emit = 0.02;
+  } else if (v_mat < 1.5) {
+    float caust = 0.88 + 0.12 * sin(v_uv.x * 28.0 + v_seed * 6.0) * sin(v_uv.y * 24.0);
+    albedo = day * caust;
+    metal = 0.06;
+    rough = 0.16;
+    emit = 0.05;
+  } else {
+    albedo = day * (0.9 + 0.1 * flake2);
+    metal = 0.02;
+    rough = 0.3;
+    emit = 0.01;
+  }
+
+  vec3 amb = mix(vec3(0.28, 0.20, 0.12), vec3(0.05, 0.06, 0.12), night);
+  vec3 key = mix(vec3(1.45, 1.22, 0.82), vec3(0.42, 0.52, 0.85), night);
+  float wrap = ndl * 0.62 + 0.48;
+  vec3 diff = albedo * (1.0 - metal) * (amb + wrap * key);
+  float specPow = mix(12.0, 110.0, clamp(1.0 - rough, 0.0, 1.0));
+  float spec = pow(ndh, specPow);
+  vec3 tang = normalize(cross(N, vec3(0.15, 1.0, 0.05)));
+  float ah = clamp(dot(normalize(cross(N, tang)), H), -1.0, 1.0);
+  float aniso = pow(max(1.0 - ah * ah, 0.0), mix(4.0, 22.0, metal));
+  vec3 F0 = mix(vec3(0.04), albedo, metal);
+  vec3 specC = F0 * (spec * 2.1 + aniso * metal * 1.15);
+  float faceOn = smoothstep(0.04, 0.32, ndv);
+  specC *= mix(0.2, 1.0, faceOn);
+  if (side) specC *= 0.35;
+  if (back && moon) specC *= 0.3;
+  vec3 env = mix(vec3(0.45, 0.26, 0.08), vec3(1.15, 0.92, 0.55), fres * 0.35 * faceOn + flake * 0.35);
+  env = mix(env, vec3(0.08, 0.10, 0.22), night);
+  float fresAmt = mix(0.16, 1.0, faceOn);
+
+  vec3 irid = 0.5 + 0.5 * cos(TAU * (vec3(0.0, 0.33, 0.67) + ndv * 1.15 + v_seed));
+  vec3 col = diff + specC + F0 * env * metal * (0.4 + 0.35 * fres * fresAmt);
+  col += F0 * fres * fresAmt * mix(0.22, 0.4, 1.0 - metal);
+  if (!back && v_mat > 0.5 && v_mat < 1.5 && !side) {
+    col += irid * fres * fresAmt * 0.28;
+    col += albedo * fres * fresAmt * 0.12;
+  }
+  if (back && !star && !moon && !side) {
+    col += irid * fres * fresAmt * 0.16;
+    col += vec3(0.25, 0.45, 0.55) * fres * fresAmt * 0.12;
+  }
+  col += albedo * emit;
+  if (back && star) {
+    col += vec3(0.85, 0.9, 1.0) * pow(ndh, 20.0) * 0.8;
+  }
+
+  col *= mix(0.78, 1.0, bevel);
+  if (!side) {
+    float rimLine = smoothstep(0.07, 0.0, abs(edge - 0.055));
+    col += vec3(1.0, 0.95, 0.85) * rimLine * 0.1 * (0.4 + 0.6 * ndl);
+  }
+
+  float sweep = mix(-1.45, 1.45, smoothstep(0.3, 7.6, T));
+  float sweepBand = exp(-pow((v_world.x - sweep) * 6.8, 2.0));
+  float sweepEnv = smoothstep(0.2, 1.0, T) * smoothstep(8.7, 6.6, T);
+  float sweepSpec = pow(ndh, 18.0) * faceOn;
+  col += vec3(1.0, 0.84, 0.55) * sweepBand * sweepEnv * sweepSpec * 0.22;
+
+  col += vec3(1.0, 0.94, 0.8) * v_flash * (0.18 + 0.35 * metal + (star && back ? 0.45 : 0.0));
+
+  float shade = 0.55 + 0.45 * clamp(N.z * 0.5 + 0.5, 0.0, 1.0);
+  col *= mix(1.0, shade, 0.18);
+
+  col = col / (1.0 + col * 0.38);
+  col = pow(max(col, vec3(0.0)), vec3(0.4545));
+
+  vec2 uv = gl_FragCoord.xy / u_res;
+  float vig = smoothstep(1.2, 0.28, length((uv - 0.5) * vec2(1.2, 1.15)));
+  col *= mix(0.62, 1.0, vig);
+  float grain = hash21(gl_FragCoord.xy + fract(T * 13.1) * 40.0) - 0.5;
+  col += grain * 0.035;
+
+  col *= fadeOf(T);
+  fragColor = vec4(col, 1.0);
+}
+`;
+
+const bgVert = `#version 300 es
+void main() {
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+`;
+
+const bgFrag = `#version 300 es
+precision highp float;
+uniform float u_time;
+uniform vec2 u_res;
+out vec4 fragColor;
+
+float hash21(vec2 p) {
+  p = fract(p * vec2(123.34, 345.45));
+  p += dot(p, p + 34.345);
+  return fract(p.x * p.y);
+}
+
+void main() {
+  float T = mod(u_time, 80.0);
+  vec2 uv = gl_FragCoord.xy / u_res;
+  float night = smoothstep(35.2, 39.2, T) * (1.0 - smoothstep(58.4, 62.0, T));
+  vec3 day = vec3(0.075, 0.045, 0.032);
+  vec3 nite = vec3(0.02, 0.025, 0.055);
+  vec3 col = mix(day, nite, night);
+  float poolY = mix(0.48, 0.55, uv.y);
+  col += vec3(0.012, 0.008, 0.005) * poolY * (1.0 - night);
+  col += vec3(0.006, 0.008, 0.016) * (1.0 - uv.y) * night * 0.45;
+  float sweep = mix(0.0, 1.0, smoothstep(0.3, 7.6, T));
+  float sweepEnv = smoothstep(0.2, 1.0, T) * smoothstep(8.7, 6.6, T);
+  float band = exp(-pow((uv.x - sweep) * 4.8, 2.0));
+  col += vec3(0.035, 0.022, 0.01) * band * sweepEnv * (1.0 - night);
+  float vig = smoothstep(1.15, 0.25, length((uv - 0.5) * vec2(1.15, 1.12)));
+  col *= mix(0.78, 1.0, vig);
+  float fade = smoothstep(0.0, 1.7, T) * smoothstep(80.0, 76.55, T);
+  float grain = hash21(gl_FragCoord.xy + fract(T * 9.0) * 20.0) - 0.5;
+  col += grain * 0.012;
+  fragColor = vec4(col * fade, 1.0);
+}
+`;
+
+const gl = canvas.getContext("webgl2", {
+  alpha: false,
+  antialias: true,
+  depth: true,
+  powerPreference: "high-performance"
+});
+if (!gl) {
+  const pre = document.createElement("pre");
+  pre.id = "err";
+  pre.textContent = "需要 WebGL2。";
+  document.body.appendChild(pre);
+  throw new Error("no webgl2");
+}
+
+function compile(type, src, name) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    const log = gl.getShaderInfoLog(s) || "";
+    const numbered = src.split("\n").map((line, i) => String(i + 1).padStart(4, " ") + "  " + line).join("\n");
+    const pre = document.createElement("pre");
+    pre.id = "err";
+    pre.textContent = name + "\n" + log + "\n\n" + numbered;
+    document.body.appendChild(pre);
+    throw new Error(log);
+  }
+  return s;
+}
+function link(vs, fs, name) {
+  const p = gl.createProgram();
+  gl.attachShader(p, vs);
+  gl.attachShader(p, fs);
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+    const log = gl.getProgramInfoLog(p) || "";
+    const pre = document.createElement("pre");
+    pre.id = "err";
+    pre.textContent = name + " link\n" + log;
+    document.body.appendChild(pre);
+    throw new Error(log);
+  }
+  return p;
+}
+
+const bgProg = link(compile(gl.VERTEX_SHADER, bgVert, "bg-vert"), compile(gl.FRAGMENT_SHADER, bgFrag, "bg-frag"), "bg");
+const prog = link(compile(gl.VERTEX_SHADER, vertSrc, "tile-vert"), compile(gl.FRAGMENT_SHADER, fragSrc, "tile-frag"), "tile");
+
+const cube = [];
+function addFace(corners, normal, faceId) {
+  const uv = [[0, 0], [1, 0], [1, 1], [0, 1]];
+  const order = [0, 1, 2, 0, 2, 3];
+  for (const i of order) {
+    cube.push(corners[i][0], corners[i][1], corners[i][2], normal[0], normal[1], normal[2], uv[i][0], uv[i][1], faceId);
+  }
+}
+addFace([[-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]], [0, 0, 1], 0);
+addFace([[1, -1, -1], [-1, -1, -1], [-1, 1, -1], [1, 1, -1]], [0, 0, -1], 1);
+addFace([[1, -1, 1], [1, -1, -1], [1, 1, -1], [1, 1, 1]], [1, 0, 0], 2);
+addFace([[-1, -1, -1], [-1, -1, 1], [-1, 1, 1], [-1, 1, -1]], [-1, 0, 0], 2);
+addFace([[-1, 1, 1], [1, 1, 1], [1, 1, -1], [-1, 1, -1]], [0, 1, 0], 2);
+addFace([[-1, -1, -1], [1, -1, -1], [1, -1, 1], [-1, -1, 1]], [0, -1, 0], 2);
+
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+const cubeBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, cubeBuf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(cube), gl.STATIC_DRAW);
+const stride = 9 * 4;
+function vat(loc, size, off) {
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, size, gl.FLOAT, false, stride, off);
+}
+vat(0, 3, 0);
+vat(1, 3, 3 * 4);
+vat(2, 2, 6 * 4);
+vat(3, 1, 8 * 4);
+
+const inst = new Float32Array(tiles.length * 18);
+for (let i = 0; i < tiles.length; i++) {
+  const t = tiles[i];
+  const o = i * 18;
+  inst[o] = t.x; inst[o + 1] = t.y;
+  inst[o + 2] = t.lx; inst[o + 3] = t.ly;
+  inst[o + 4] = t.day[0]; inst[o + 5] = t.day[1]; inst[o + 6] = t.day[2];
+  inst[o + 7] = t.night[0]; inst[o + 8] = t.night[1]; inst[o + 9] = t.night[2];
+  inst[o + 10] = t.flock; inst[o + 11] = t.mat; inst[o + 12] = t.tail; inst[o + 13] = t.wing;
+  inst[o + 14] = t.tx; inst[o + 15] = t.ty;
+  inst[o + 16] = t.seed;
+  inst[o + 17] = t.flag;
+}
+const instBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
+gl.bufferData(gl.ARRAY_BUFFER, inst, gl.STATIC_DRAW);
+const iStride = 18 * 4;
+function iat(loc, size, off) {
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, size, gl.FLOAT, false, iStride, off);
+  gl.vertexAttribDivisor(loc, 1);
+}
+iat(4, 2, 0);
+iat(5, 2, 2 * 4);
+iat(6, 3, 4 * 4);
+iat(7, 3, 7 * 4);
+iat(8, 4, 10 * 4);
+iat(9, 2, 14 * 4);
+iat(10, 1, 16 * 4);
+iat(11, 1, 17 * 4);
+
+function loc(name) { return gl.getUniformLocation(prog, name); }
+const uTime = loc("u_time");
+const uGrid = loc("u_grid");
+const uFishHome = loc("u_fishHome");
+const uC1Home = loc("u_c1Home");
+const uC2Home = loc("u_c2Home");
+const uDoveHome = loc("u_doveHome");
+const uFishH = loc("u_fishH");
+const uC1H = loc("u_c1H");
+const uC2H = loc("u_c2H");
+const uDoveH = loc("u_doveH");
+const uFish = loc("u_fish[0]");
+const uC1 = loc("u_c1[0]");
+const uC2 = loc("u_c2[0]");
+const uDove = loc("u_dove[0]");
+const uSplash = loc("u_splash");
+const uRes = loc("u_res");
+const bgTime = gl.getUniformLocation(bgProg, "u_time");
+const bgRes = gl.getUniformLocation(bgProg, "u_res");
+
+gl.useProgram(prog);
+gl.uniform1f(uGrid, N);
+gl.uniform2f(uFishHome, fishInfo.c[0], fishInfo.c[1]);
+gl.uniform2f(uC1Home, c1Info.c[0], c1Info.c[1]);
+gl.uniform2f(uC2Home, c2Info.c[0], c2Info.c[1]);
+gl.uniform2f(uDoveHome, doveInfo.c[0], doveInfo.c[1]);
+gl.uniform1f(uFishH, fishInfo.h);
+gl.uniform1f(uC1H, c1Info.h);
+gl.uniform1f(uC2H, c2Info.h);
+gl.uniform1f(uDoveH, doveInfo.h);
+gl.uniform4fv(uFish, packKeys(fishKeys));
+gl.uniform4fv(uC1, packKeys(c1Keys));
+gl.uniform4fv(uC2, packKeys(c2Keys));
+gl.uniform4fv(uDove, packKeys(doveKeys));
+gl.uniform2f(uSplash, fishInfo.c[0] + 0.04, fishInfo.c[1] + 0.20);
+
+let audioOn = false;
+let AC = null;
+let clickBuf = null;
+let padGain = null;
+let shimGain = null;
+let subGain = null;
+let filter = null;
+let clickCursor = 0;
+
+function ramp(e0, e1, x) {
+  const t = clamp((x - e0) / (e1 - e0), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+function envPad(T) {
+  const fade = ramp(0, 1.8, T) * ramp(80, 76.4, T);
+  let g = 0.11;
+  g += 0.035 * ramp(0.4, 6.5, T) * ramp(12, 8, T);
+  const swell = ramp(63.0, 67.0, T) * ramp(73.6, 69.2, T);
+  g += swell * 0.52;
+  return g * fade;
+}
+function envCut(T) {
+  let c = 480;
+  c += 1100 * ramp(0.6, 7.2, T) * ramp(14, 8.2, T);
+  c += 700 * ramp(41, 50, T) * ramp(58, 52, T);
+  const swell = ramp(63, 67.2, T) * ramp(73.2, 69, T);
+  c += swell * 2400;
+  const night = ramp(36, 40, T) * ramp(61, 57, T);
+  c += night * 280;
+  return c;
+}
+function envShim(T) {
+  const fade = ramp(1.2, 3.5, T) * ramp(80, 76.3, T);
+  let s = 0;
+  s += 0.012 * ramp(0.8, 5.5, T) * ramp(10, 7.2, T);
+  s += 0.014 * ramp(42, 48, T) * ramp(56, 52, T);
+  s += 0.016 * ramp(63.5, 67.5, T) * ramp(73, 69.5, T);
+  s += 0.018 * ramp(75.0, 75.6, T) * ramp(76.8, 76.2, T);
+  return s * fade;
+}
+function envSub(T) {
+  const swell = ramp(63.2, 67.4, T) * ramp(73.2, 69.4, T);
+  const fade = ramp(0, 1.5, T) * ramp(80, 76.4, T);
+  return swell * 0.55 * fade;
+}
+function envThird(T) {
+  return ramp(35.5, 39.5, T) * ramp(61.5, 57.2, T);
+}
+
+function setupAudio() {
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return;
+  AC = new Ctx();
+  const master = AC.createGain();
+  master.gain.value = 0.85;
+  const comp = AC.createDynamicsCompressor();
+  comp.threshold.value = -16;
+  comp.knee.value = 18;
+  comp.ratio.value = 2.6;
+  comp.attack.value = 0.008;
+  comp.release.value = 0.25;
+  master.connect(comp);
+  comp.connect(AC.destination);
+
+  filter = AC.createBiquadFilter();
+  filter.type = "lowpass";
+  filter.frequency.value = 500;
+  filter.Q.value = 0.55;
+  const hp = AC.createBiquadFilter();
+  hp.type = "highpass";
+  hp.frequency.value = 65;
+  hp.Q.value = 0.7;
+  padGain = AC.createGain();
+  padGain.gain.value = 0;
+  hp.connect(filter);
+  filter.connect(padGain);
+  padGain.connect(master);
+  const clickBus = AC.createGain();
+  clickBus.gain.value = 0.7;
+  clickBus.connect(master);
+  setupAudio._clickBus = clickBus;
+
+  const partials = [
+    [110, 0.16, -0.45],
+    [164.81, 0.11, 0.4],
+    [220, 0.13, -0.3],
+    [277.18, 0.07, 0.35],
+    [329.63, 0.08, -0.25],
+    [493.88, 0.035, 0.5]
+  ];
+  const cSharpGain = AC.createGain();
+  cSharpGain.gain.value = 1;
+  for (const [freq, g, pan] of partials) {
+    const o1 = AC.createOscillator();
+    const o2 = AC.createOscillator();
+    o1.type = "sine";
+    o2.type = "sine";
+    o1.frequency.value = freq;
+    o2.frequency.value = freq + (freq < 200 ? 0.35 : 0.6);
+    const g1 = AC.createGain();
+    const g2 = AC.createGain();
+    g1.gain.value = g;
+    g2.gain.value = g * 0.55;
+    const p1 = AC.createStereoPanner();
+    const p2 = AC.createStereoPanner();
+    p1.pan.value = pan;
+    p2.pan.value = -pan * 0.8;
+    const dest = Math.abs(freq - 277.18) < 0.1 ? cSharpGain : hp;
+    o1.connect(g1); g1.connect(p1); p1.connect(dest);
+    o2.connect(g2); g2.connect(p2); p2.connect(dest);
+    o1.start();
+    o2.start();
+  }
+  cSharpGain.connect(hp);
+  const cNat = AC.createOscillator();
+  cNat.type = "sine";
+  cNat.frequency.value = 261.63;
+  const cNatG = AC.createGain();
+  cNatG.gain.value = 0;
+  cNat.connect(cNatG); cNatG.connect(hp); cNat.start();
+  setupAudio._cNat = cNatG;
+  setupAudio._cSharp = cSharpGain;
+
+  subGain = AC.createGain();
+  subGain.gain.value = 0;
+  const sub = AC.createOscillator();
+  sub.type = "sine";
+  sub.frequency.value = 55;
+  sub.connect(subGain);
+  subGain.connect(master);
+  sub.start();
+
+  shimGain = AC.createGain();
+  shimGain.gain.value = 0;
+  shimGain.connect(filter);
+  const shim = AC.createOscillator();
+  shim.type = "sine";
+  shim.frequency.value = 880;
+  shim.connect(shimGain);
+  shim.start();
+
+  const nClick = Math.floor(AC.sampleRate * 0.03);
+  clickBuf = AC.createBuffer(1, nClick, AC.sampleRate);
+  const cd = clickBuf.getChannelData(0);
+  for (let i = 0; i < nClick; i++) {
+    const t = i / AC.sampleRate;
+    const env = Math.exp(-t * 180);
+    const tone = Math.sin(2 * Math.PI * 1480 * t);
+    const tone2 = Math.sin(2 * Math.PI * 2220 * t) * Math.exp(-t * 240);
+    cd[i] = (tone * 0.75 + tone2 * 0.25) * env;
+  }
+
+}
+
+function playClick(when, gain, rate) {
+  if (!AC || !clickBuf) return;
+  const src = AC.createBufferSource();
+  src.buffer = clickBuf;
+  src.playbackRate.value = rate;
+  const g = AC.createGain();
+  g.gain.value = gain;
+  const p = AC.createStereoPanner();
+  p.pan.value = (Math.random() * 2 - 1) * 0.65;
+  src.connect(g); g.connect(p); p.connect(setupAudio._clickBus || AC.destination);
+  src.start(when);
+  src.stop(when + 0.06);
+}
+
+function fireRange(t0, t1, baseWhen) {
+  if (!audioOn) return;
+  let k = 0;
+  while (clickCursor < clicks.length && clicks[clickCursor].t <= t0) clickCursor++;
+  let i = clickCursor;
+  while (i < clicks.length && clicks[i].t <= t1) {
+    const c = clicks[i];
+    if (c.t > t0) {
+      playClick(baseWhen + k * 0.0012, c.gain, c.rate);
+      k++;
+    }
+    i++;
+  }
+}
+
+function resize() {
+  const css = Math.max(2, Math.floor(Math.min(window.innerWidth, window.innerHeight)));
+  canvas.style.width = css + "px";
+  canvas.style.height = css + "px";
+  const s = Math.min(window.devicePixelRatio || 1, 2);
+  const size = Math.max(2, Math.floor(css * s));
+  if (canvas.width !== size || canvas.height !== size) {
+    canvas.width = size;
+    canvas.height = size;
+  }
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+window.addEventListener("resize", resize);
+resize();
+
+const tOrigin = performance.now() / 1000 - startAt;
+let prevT = -1;
+
+function frame() {
+  const now = performance.now() / 1000;
+  let T = freeze ? ((startAt % DURATION) + DURATION) % DURATION : ((now - tOrigin) % DURATION + DURATION) % DURATION;
+  resize();
+  gl.disable(gl.DEPTH_TEST);
+  gl.disable(gl.CULL_FACE);
+  gl.useProgram(bgProg);
+  gl.uniform1f(bgTime, T);
+  gl.uniform2f(bgRes, canvas.width, canvas.height);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  gl.enable(gl.DEPTH_TEST);
+  gl.clear(gl.DEPTH_BUFFER_BIT);
+  gl.useProgram(prog);
+  gl.uniform1f(uTime, T);
+  gl.uniform2f(uRes, canvas.width, canvas.height);
+  gl.bindVertexArray(vao);
+  gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, tiles.length);
+
+  if (audioOn && AC && padGain) {
+    const nightMix = envThird(T);
+    padGain.gain.setTargetAtTime(envPad(T), AC.currentTime, 0.06);
+    filter.frequency.setTargetAtTime(envCut(T) + Math.sin(T * 0.31) * 60, AC.currentTime, 0.08);
+    shimGain.gain.setTargetAtTime(envShim(T), AC.currentTime, 0.08);
+    subGain.gain.setTargetAtTime(envSub(T), AC.currentTime, 0.1);
+    if (setupAudio._cNat) {
+      setupAudio._cNat.gain.setTargetAtTime(0.07 * nightMix, AC.currentTime, 0.15);
+    }
+    if (setupAudio._cSharp) {
+      setupAudio._cSharp.gain.setTargetAtTime(1 - nightMix * 0.85, AC.currentTime, 0.15);
+    }
+    if (prevT >= 0) {
+      if (T + 0.0001 < prevT) {
+        fireRange(prevT, DURATION, AC.currentTime);
+        clickCursor = 0;
+        fireRange(0, T, AC.currentTime);
+      } else {
+        fireRange(prevT, T, AC.currentTime);
+      }
+    }
+  }
+  prevT = T;
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+function startSound() {
+  if (audioOn) return;
+  if (!AC) setupAudio();
+  if (!AC) return;
+  const go = () => {
+    audioOn = true;
+    soundBtn.classList.remove("show");
+  };
+  if (AC.state === "running") go();
+  else AC.resume().then(go).catch(() => {});
+}
+soundBtn.addEventListener("click", (e) => { e.stopPropagation(); startSound(); });
+window.addEventListener("pointerdown", startSound);
+window.addEventListener("keydown", startSound);
+
+setTimeout(() => {
+  if (!AC) setupAudio();
+  if (!audioOn) soundBtn.classList.add("show");
+}, 400);
+</script>
+</body>
+</html>
