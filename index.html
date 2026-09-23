@@ -59,7 +59,9 @@
 "use strict";
 
 const DURATION = 80;
-const N = 48;
+const DESIGN = 48;
+const N = 96;
+const S = N / DESIGN;
 
 const params = new URLSearchParams(location.search);
 const startAt = Number(params.get("t")) || 0;
@@ -149,6 +151,7 @@ function ellipseHit(ix, iy, cx, cy, rx, ry, rot) {
   return (x * x) / (rx * rx) + (y * y) / (ry * ry) <= 1;
 }
 function stampEllipse(cx, cy, rx, ry, rot, fn) {
+  cx *= S; cy *= S; rx *= S; ry *= S;
   const pad = Math.ceil(Math.max(rx, ry) + 1);
   for (let iy = Math.floor(cy - pad); iy <= Math.ceil(cy + pad); iy++) {
     for (let ix = Math.floor(cx - pad); ix <= Math.ceil(cx + pad); ix++) {
@@ -164,6 +167,7 @@ function closestT(px, py, ax, ay, bx, by) {
   return clamp(((px - ax) * vx + (py - ay) * vy) / l2, 0, 1);
 }
 function stampCapsule(x0, y0, x1, y1, r, fn) {
+  x0 *= S; y0 *= S; x1 *= S; y1 *= S; r *= S;
   const minx = Math.floor(Math.min(x0, x1) - r - 1);
   const maxx = Math.ceil(Math.max(x0, x1) + r + 1);
   const miny = Math.floor(Math.min(y0, y1) - r - 1);
@@ -188,8 +192,12 @@ function bez(p0, p1, p2, t) {
   ];
 }
 function stampBezier(p0, p1, p2, r, fn) {
-  const steps = 28;
-  let minx = 99, maxx = -99, miny = 99, maxy = -99;
+  p0 = [p0[0] * S, p0[1] * S];
+  p1 = [p1[0] * S, p1[1] * S];
+  p2 = [p2[0] * S, p2[1] * S];
+  r *= S;
+  const steps = Math.ceil(36 * S);
+  let minx = Infinity, maxx = -Infinity, miny = Infinity, maxy = -Infinity;
   for (let i = 0; i <= steps; i++) {
     const p = bez(p0, p1, p2, i / steps);
     minx = Math.min(minx, p[0]); maxx = Math.max(maxx, p[0]);
@@ -213,13 +221,14 @@ function stampBezier(p0, p1, p2, r, fn) {
 }
 
 function seaLine(ix) {
-  return 29.4 + Math.sin(ix * 0.42) * 0.85 + Math.sin(ix * 0.13 + 1.2) * 0.45;
+  const x = ix / S;
+  return (29.4 + Math.sin(x * 0.42) * 0.85 + Math.sin(x * 0.13 + 1.2) * 0.45) * S;
 }
 
 eachTile((t) => {
   const boundary = seaLine(t.ix);
   if (t.iy + 0.5 > boundary) {
-    const depth = clamp((t.iy - boundary) / 16, 0, 1);
+    const depth = clamp((t.iy - boundary) / (16 * S), 0, 1);
     const h = t.seed;
     const shallow = [0.10, 0.38, 0.52];
     const mid = [0.05, 0.24, 0.48];
@@ -227,11 +236,12 @@ eachTile((t) => {
     let col = depth < 0.45
       ? vary(lerpArr(shallow, mid, depth / 0.45), 0.06, h)
       : vary(lerpArr(mid, deep, (depth - 0.45) / 0.55), 0.05, h);
-    const wave = 4.2 + Math.sin(t.ix * 0.55 + 0.6) * 0.7;
-    if (Math.abs((t.iy + 0.5) - (boundary + wave)) < 0.85) {
+    const x = t.ix / S;
+    const wave = (4.2 + Math.sin(x * 0.55 + 0.6) * 0.7) * S;
+    if (Math.abs((t.iy + 0.5) - (boundary + wave)) < 0.85 * S) {
       col = vary([0.07, 0.28, 0.46], 0.03, h);
     }
-    if (Math.abs((t.iy + 0.5) - boundary) < 1.15) {
+    if (Math.abs((t.iy + 0.5) - boundary) < 1.15 * S) {
       col = vary([0.55, 0.72, 0.70], 0.04, h);
     }
     t.day = col;
@@ -242,7 +252,7 @@ eachTile((t) => {
       0.30 + h * 0.06
     ];
   } else {
-    const sx = 24.0, sy = 16.2, sr = 7.6;
+    const sx = 24.0 * S, sy = 16.2 * S, sr = 7.6 * S;
     const dx = t.ix + 0.5 - sx;
     const dy = t.iy + 0.5 - sy;
     if (dx * dx + dy * dy < sr * sr) {
@@ -261,10 +271,13 @@ function paintFish() {
   const copper = [0.74, 0.40, 0.16];
   const oranges = [[0.90, 0.34, 0.07], [0.78, 0.26, 0.05], [0.86, 0.40, 0.10]];
   const blue = [0.22, 0.48, 0.86];
-  const bodyC = [27.2, 38.0];
-  const rot = -0.04;
+  const bodyC = [28.2, 38.4];
+  const rot = -0.05;
+  const tailUp = 2.36;
+  const tailDn = -2.36;
   function mark(t, col, mat) {
-    if (t.ix < 2 || t.iy < 2 || t.ix >= N - 2 || t.iy >= N - 2) return;
+    const edge = 2 * S;
+    if (t.ix < edge || t.iy < edge || t.ix >= N - edge || t.iy >= N - edge) return;
     t.flock = F_FISH;
     t.mat = mat;
     t.day = vary(col, 0.045, t.seed);
@@ -272,48 +285,52 @@ function paintFish() {
   }
   function paintBodyTile(t) {
     const h = hash2(t.ix * 1.3, t.iy * 1.7);
-    const up = (bodyC[1] - (t.iy + 0.5)) / 3.1;
-    const col = up > 0.2 ? oranges[Math.floor(h * 3) % 3] : copper;
+    const up = (bodyC[1] * S - (t.iy + 0.5)) / (2.6 * S);
+    const col = up > 0.12 ? oranges[Math.floor(h * 3) % 3] : copper;
     mark(t, col, MAT_GLASS);
   }
-  stampEllipse(bodyC[0], bodyC[1], 9.45, 4.15, rot, (t) => mark(t, blue, MAT_GLASS));
-  stampEllipse(34.8, 37.4, 3.65, 3.05, rot, (t) => mark(t, blue, MAT_GLASS));
-  stampCapsule(19.6, 37.6, 14.4, 34.4, 1.9, (t) => mark(t, blue, MAT_GLASS));
-  stampCapsule(19.6, 38.6, 14.6, 42.2, 1.8, (t) => mark(t, blue, MAT_GLASS));
-  stampCapsule(24.2, 35.4, 30.8, 32.8, 1.6, (t) => mark(t, blue, MAT_GLASS));
-  stampCapsule(31.8, 39.8, 28.0, 43.0, 1.4, (t) => mark(t, blue, MAT_GLASS));
-  stampEllipse(bodyC[0], bodyC[1], 8.4, 3.05, rot, (t) => paintBodyTile(t));
-  stampEllipse(34.8, 37.4, 2.7, 2.15, rot, (t) => paintBodyTile(t));
-  stampCapsule(19.6, 37.6, 15.2, 35.2, 1.15, (t) => paintBodyTile(t));
-  stampCapsule(19.6, 38.6, 15.4, 41.2, 1.05, (t) => paintBodyTile(t));
-  stampCapsule(24.5, 35.2, 30.5, 33.6, 0.9, (t) => paintBodyTile(t));
-  stampCapsule(31.5, 39.6, 28.6, 42.0, 0.72, (t) => paintBodyTile(t));
-  stampEllipse(36.2, 36.9, 0.58, 0.5, 0, (t) => mark(t, [0.08, 0.05, 0.04], MAT_DARK));
+  const outline = (t) => mark(t, blue, MAT_GLASS);
+  const body = (t) => paintBodyTile(t);
+  stampEllipse(bodyC[0], bodyC[1], 8.15, 3.35, rot, outline);
+  stampEllipse(34.3, 37.85, 3.25, 2.75, -0.1, outline);
+  stampCapsule(21.0, 38.55, 16.9, 38.45, 1.15, outline);
+  stampEllipse(16.15, 36.65, 2.55, 1.15, tailUp, outline);
+  stampEllipse(16.25, 40.15, 2.4, 1.1, tailDn, outline);
+  stampBezier([25.2, 35.75], [28.0, 32.85], [31.6, 35.2], 1.12, outline);
+  stampBezier([33.0, 39.55], [30.3, 41.85], [28.3, 40.45], 0.95, outline);
+  stampEllipse(bodyC[0], bodyC[1], 7.5, 2.7, rot, body);
+  stampEllipse(34.3, 37.85, 2.6, 2.1, -0.1, body);
+  stampCapsule(21.15, 38.55, 17.35, 38.45, 0.68, body);
+  stampEllipse(16.2, 36.75, 2.0, 0.72, tailUp, body);
+  stampEllipse(16.3, 40.05, 1.85, 0.68, tailDn, body);
+  stampBezier([25.55, 35.9], [28.15, 33.55], [31.15, 35.4], 0.58, body);
+  stampBezier([32.65, 39.6], [30.45, 41.4], [28.65, 40.4], 0.46, body);
+  stampEllipse(35.55, 37.35, 0.7, 0.58, 0, (t) => mark(t, [0.08, 0.05, 0.04], MAT_DARK));
 }
 
 function paintBird(o) {
   const white = o.white;
   const tip = o.tip;
-  const beak = o.beak;
+  const beak = o.beakCol;
   const flock = o.flock;
   function bodyTile(t, mat, col, wing) {
+    const edge = 2 * S;
+    if (t.ix < edge || t.iy < edge || t.ix >= N - edge || t.iy >= N - edge) return;
     t.flock = flock;
     t.mat = mat;
-    t.day = vary(col, 0.045, t.seed);
+    t.day = vary(col, 0.04, t.seed);
     if (wing !== undefined) t.wing = wing;
   }
-  stampBezier(o.wingUp[0], o.wingUp[1], o.wingUp[2], o.wingR, (t, tt) => {
-    const prim = tt > 0.74;
-    bodyTile(t, prim ? MAT_DARK : MAT_GLASS, prim ? tip : white, (0.18 + 0.82 * tt));
-  });
-  stampBezier(o.wingDn[0], o.wingDn[1], o.wingDn[2], o.wingR * 0.92, (t, tt) => {
-    const prim = tt > 0.74;
-    bodyTile(t, prim ? MAT_DARK : MAT_GLASS, prim ? tip : white, -(0.18 + 0.82 * tt));
-  });
-  if (o.tail) {
-    stampCapsule(o.tail[0][0], o.tail[0][1], o.tail[1][0], o.tail[1][1], o.tailR || 0.8, (t) => {
-      bodyTile(t, MAT_GLASS, white, 0);
+  for (const w of o.wings) {
+    const darkFrom = w[4] == null ? 2 : w[4];
+    const sign = w[5] || 1;
+    stampBezier(w[0], w[1], w[2], w[3], (t, tt) => {
+      const dark = tt > darkFrom;
+      bodyTile(t, dark ? MAT_DARK : MAT_GLASS, dark ? tip : white, sign * (0.12 + 0.88 * tt));
     });
+  }
+  for (const f of o.tail) {
+    stampCapsule(f[0], f[1], f[2], f[3], f[4], (t) => bodyTile(t, MAT_GLASS, white, 0.04));
   }
   stampEllipse(o.body[0], o.body[1], o.body[2], o.body[3], o.body[4] || 0, (t) => {
     bodyTile(t, MAT_GLASS, white, 0);
@@ -321,23 +338,23 @@ function paintBird(o) {
   stampBezier(o.neck[0], o.neck[1], o.neck[2], o.neckR, (t) => {
     bodyTile(t, MAT_GLASS, white, 0);
   });
-  stampEllipse(o.head[0], o.head[1], o.head[2], o.head[2] * 0.92, 0, (t) => {
+  stampEllipse(o.head[0], o.head[1], o.head[2], o.head[2] * 0.9, 0, (t) => {
     bodyTile(t, MAT_GLASS, white, 0);
   });
-  stampCapsule(o.beakL[0], o.beakL[1], o.beakL[2], o.beakL[3], o.beakR, (t) => {
+  stampCapsule(o.beak[0], o.beak[1], o.beak[2], o.beak[3], o.beak[4], (t) => {
     bodyTile(t, MAT_GOLD, beak, 0);
   });
   if (o.crown) {
-    stampEllipse(o.crown[0], o.crown[1], o.crown[2], o.crown[2], 0, (t) => {
+    stampEllipse(o.crown[0], o.crown[1], o.crown[2], o.crown[2] * 0.72, 0, (t) => {
       bodyTile(t, MAT_GLASS, [0.78, 0.09, 0.07], 0);
     });
   }
-  if (o.legs) {
-    stampCapsule(o.legs[0], o.legs[1], o.legs[2], o.legs[3], 0.38, (t) => {
+  for (const leg of o.legs) {
+    stampCapsule(leg[0], leg[1], leg[2], leg[3], leg[4], (t) => {
       bodyTile(t, MAT_DARK, [0.10, 0.08, 0.07], 0);
     });
   }
-  stampEllipse(o.eye[0], o.eye[1], 0.62, 0.55, 0, (t) => {
+  stampEllipse(o.eye[0], o.eye[1], o.eye[2], o.eye[2] * 0.85, 0, (t) => {
     bodyTile(t, MAT_DARK, [0.05, 0.045, 0.04], 0);
   });
 }
@@ -347,73 +364,95 @@ paintFish();
 paintBird({
   flock: F_C1,
   white: [0.96, 0.94, 0.89],
-  tip: [0.06, 0.055, 0.05],
-  beak: [0.92, 0.68, 0.20],
-  body: [11.6, 17.2, 3.35, 1.85, -0.2],
-  neck: [[13.8, 16.2], [17.2, 12.2], [20.4, 10.8]],
-  neckR: 0.82,
-  head: [20.8, 10.5, 1.12],
-  beakL: [21.7, 10.35, 23.6, 10.05],
-  beakR: 0.34,
-  crown: [20.6, 9.25, 0.55],
-  eye: [21.3, 10.35],
-  wingUp: [[10.4, 15.8], [6.2, 9.6], [4.0, 13.2]],
-  wingDn: [[10.6, 18.4], [6.0, 24.2], [3.9, 21.6]],
-  wingR: 1.28,
-  tail: [[8.6, 18.0], [5.2, 19.4]],
-  tailR: 0.72,
-  legs: [11.0, 18.8, 9.0, 22.6]
+  tip: [0.07, 0.06, 0.055],
+  beakCol: [0.93, 0.62, 0.16],
+  body: [11.4, 18.7, 3.7, 1.45, -0.12],
+  neck: [[14.4, 17.7], [17.6, 13.2], [20.0, 11.5]],
+  neckR: 0.58,
+  head: [20.55, 11.25, 1.02],
+  beak: [21.35, 11.05, 24.15, 10.55, 0.26],
+  crown: [20.25, 10.25, 0.5],
+  eye: [21.05, 11.05, 0.42],
+  wings: [
+    [[13.2, 17.5], [10.6, 15.0], [8.0, 16.2], 1.12, 2, 1],
+    [[12.6, 18.3], [9.8, 16.5], [7.6, 17.5], 0.7, 2, 1],
+    [[9.6, 15.5], [8.0, 14.4], [6.6, 15.7], 0.46, 0.28, 1]
+  ],
+  tail: [
+    [8.2, 19.3, 5.5, 17.9, 0.42],
+    [8.1, 19.6, 5.2, 19.8, 0.4],
+    [8.3, 19.5, 5.8, 21.4, 0.38]
+  ],
+  legs: [
+    [10.6, 19.9, 9.6, 26.8, 0.32],
+    [12.2, 20.0, 12.9, 27.1, 0.3],
+    [9.6, 26.8, 8.5, 27.15, 0.26],
+    [12.9, 27.1, 14.0, 27.35, 0.24]
+  ]
 });
 
 paintBird({
   flock: F_C2,
   white: [0.95, 0.93, 0.88],
   tip: [0.07, 0.06, 0.055],
-  beak: [0.90, 0.64, 0.18],
-  body: [36.8, 20.2, 3.2, 1.8, 0.15],
-  neck: [[34.6, 19.2], [30.8, 15.4], [28.0, 14.4]],
-  neckR: 0.78,
-  head: [27.5, 14.15, 1.08],
-  beakL: [26.6, 14.0, 24.8, 13.75],
-  beakR: 0.32,
-  crown: [27.6, 12.95, 0.52],
-  eye: [27.0, 14.0],
-  wingUp: [[38.0, 18.8], [42.6, 13.2], [44.8, 16.4]],
-  wingDn: [[37.8, 21.4], [42.8, 26.6], [44.6, 24.2]],
-  wingR: 1.22,
-  tail: [[39.4, 21.0], [42.6, 22.4]],
-  tailR: 0.7,
-  legs: [36.6, 21.8, 38.8, 25.6]
+  beakCol: [0.90, 0.58, 0.14],
+  body: [37.0, 20.2, 3.55, 1.4, 0.1],
+  neck: [[34.2, 19.2], [31.0, 15.5], [28.6, 14.45]],
+  neckR: 0.55,
+  head: [28.05, 14.2, 0.98],
+  beak: [27.15, 14.05, 24.45, 13.6, 0.24],
+  crown: [28.2, 13.25, 0.46],
+  eye: [27.55, 14.05, 0.4],
+  wings: [
+    [[35.2, 19.0], [37.8, 16.8], [40.2, 18.1], 1.08, 2, -1],
+    [[35.6, 19.8], [38.4, 18.2], [40.6, 19.3], 0.66, 2, -1],
+    [[38.2, 17.3], [39.6, 16.2], [41.2, 17.6], 0.44, 0.28, -1]
+  ],
+  tail: [
+    [40.0, 20.9, 42.8, 19.6, 0.4],
+    [40.1, 21.2, 43.1, 21.6, 0.38],
+    [39.9, 21.15, 42.5, 23.0, 0.36]
+  ],
+  legs: [
+    [36.2, 21.4, 35.4, 27.4, 0.3],
+    [37.8, 21.5, 38.6, 27.6, 0.28],
+    [35.4, 27.4, 34.3, 27.7, 0.24],
+    [38.6, 27.6, 39.7, 27.9, 0.22]
+  ]
 });
 
 paintBird({
   flock: F_DOVE,
-  white: [0.97, 0.95, 0.92],
-  tip: [0.58, 0.56, 0.54],
-  beak: [0.90, 0.58, 0.55],
-  body: [24.0, 6.7, 1.75, 1.05, -0.05],
-  neck: [[25.3, 6.4], [26.3, 5.9], [26.9, 5.85]],
-  neckR: 0.55,
-  head: [27.2, 5.75, 0.82],
-  beakL: [27.8, 5.65, 29.2, 5.45],
-  beakR: 0.28,
+  white: [0.97, 0.96, 0.93],
+  tip: [0.45, 0.48, 0.52],
+  beakCol: [0.86, 0.45, 0.42],
+  body: [22.8, 6.15, 2.15, 1.22, -0.08],
+  neck: [[24.5, 5.85], [25.3, 5.35], [25.85, 5.2]],
+  neckR: 0.48,
+  head: [26.15, 5.15, 0.78],
+  beak: [26.8, 5.05, 28.15, 4.85, 0.2],
   crown: null,
-  eye: [27.45, 5.6],
-  wingUp: [[23.2, 6.1], [20.4, 4.0], [18.4, 5.2]],
-  wingDn: [[23.4, 7.3], [20.2, 9.4], [18.6, 8.3]],
-  wingR: 0.82,
-  tail: [[22.4, 7.0], [20.0, 7.5]],
-  tailR: 0.5,
-  legs: null
+  eye: [26.45, 5.0, 0.32],
+  wings: [
+    [[23.6, 5.6], [21.8, 4.85], [20.0, 5.65], 0.58, 0.7, 1],
+    [[23.0, 6.35], [21.2, 6.55], [19.6, 6.15], 0.4, 2, 1]
+  ],
+  tail: [
+    [20.9, 6.35, 18.7, 5.35, 0.32],
+    [20.8, 6.55, 18.4, 6.55, 0.3],
+    [20.9, 6.7, 18.8, 7.55, 0.3]
+  ],
+  legs: []
 });
 
 eachTile((t) => {
-  const b = 2;
+  const b = Math.round(2 * S);
+  const c = Math.round(4 * S);
   const edge = t.ix < b || t.iy < b || t.ix >= N - b || t.iy >= N - b;
   if (!edge) return;
   const outer = t.ix === 0 || t.iy === 0 || t.ix === N - 1 || t.iy === N - 1;
-  const corner = (t.ix < 4 && t.iy < 4) || (t.ix < 4 && t.iy >= N - 4) ||
-    (t.ix >= N - 4 && t.iy < 4) || (t.ix >= N - 4 && t.iy >= N - 4);
+  const corner = (t.ix < c && t.iy < c) || (t.ix < c && t.iy >= N - c) ||
+    (t.ix >= N - c && t.iy < c) || (t.ix >= N - c && t.iy >= N - c);
   t.flock = F_NONE;
   t.wing = 0;
   t.sun = false;
@@ -431,17 +470,20 @@ eachTile((t) => {
 });
 
 function crescent(ix, iy) {
-  const dx = ix + 0.5 - 40.2;
-  const dy = iy + 0.5 - 8.4;
-  const outer = dx * dx + dy * dy < 4.7 * 4.7;
-  const dx2 = ix + 0.5 - 42.3;
-  const dy2 = iy + 0.5 - 7.2;
-  const inner = dx2 * dx2 + dy2 * dy2 < 4.05 * 4.05;
+  const dx = ix + 0.5 - 40.2 * S;
+  const dy = iy + 0.5 - 8.4 * S;
+  const ro = 4.7 * S;
+  const ri = 4.05 * S;
+  const outer = dx * dx + dy * dy < ro * ro;
+  const dx2 = ix + 0.5 - 42.3 * S;
+  const dy2 = iy + 0.5 - 7.2 * S;
+  const inner = dx2 * dx2 + dy2 * dy2 < ri * ri;
   return outer && !inner;
 }
 eachTile((t) => {
   if (t.flock !== F_NONE) return;
-  if (t.ix < 2 || t.iy < 2 || t.ix >= N - 2 || t.iy >= N - 2) return;
+  const edge = 2 * S;
+  if (t.ix < edge || t.iy < edge || t.ix >= N - edge || t.iy >= N - edge) return;
   if (!crescent(t.ix, t.iy)) return;
   if (t.iy + 0.5 > seaLine(t.ix)) return;
   t.flag = 3;
@@ -485,8 +527,9 @@ addLine(Sadr[0], Sadr[1], Albireo[0], Albireo[1], 0.07);
 
 const starCands = tiles.filter((t) => {
   if (t.flock !== F_NONE || t.flag === 3 || t.sun) return false;
-  if (t.ix < 3 || t.iy < 3 || t.ix >= N - 3 || t.iy >= N - 3) return false;
-  if (t.iy + 0.5 > seaLine(t.ix) - 1) return false;
+  const inset = 3 * S;
+  if (t.ix < inset || t.iy < inset || t.ix >= N - inset || t.iy >= N - inset) return false;
+  if (t.iy + 0.5 > seaLine(t.ix) - S) return false;
   return t.mat === MAT_GOLD;
 });
 starCands.sort((a, b) => a.ix - b.ix || a.iy - b.iy);
@@ -511,8 +554,8 @@ for (let i = 0; i < starCount; i++) {
 }
 
 function worldOf(gx, gy) {
-  const x = ((gx) / N) * 2 - 1;
-  const y = 1 - ((gy) / N) * 2;
+  const x = (gx / DESIGN) * 2 - 1;
+  const y = 1 - (gy / DESIGN) * 2;
   return [x, y];
 }
 function headingOf(from, to) {
@@ -543,16 +586,17 @@ function finalize(flock, heading) {
   return { c: [cx, cy], h: heading, n };
 }
 
-const fishInfo = finalize(F_FISH, headingOf([27.2, 38.0], [34.8, 37.4]));
-const c1Info = finalize(F_C1, headingOf([11.6, 17.2], [20.8, 10.5]));
-const c2Info = finalize(F_C2, headingOf([36.8, 20.2], [27.5, 14.15]));
-const doveInfo = finalize(F_DOVE, headingOf([24.0, 6.7], [27.2, 5.75]));
+const fishInfo = finalize(F_FISH, headingOf([28.2, 38.4], [35.6, 37.4]));
+const c1Info = finalize(F_C1, headingOf([11.4, 18.7], [20.55, 11.25]));
+const c2Info = finalize(F_C2, headingOf([37.0, 20.2], [28.05, 14.2]));
+const doveInfo = finalize(F_DOVE, headingOf([22.8, 6.15], [26.15, 5.15]));
 
 let lastTile = null;
 let lastD = 1e9;
 eachTile((t) => {
   if (t.flock !== F_NONE || t.flag !== 0) return;
-  if (t.ix < 3 || t.iy < 3 || t.ix >= N - 3 || t.iy >= N - 3) return;
+  const inset = 3 * S;
+  if (t.ix < inset || t.iy < inset || t.ix >= N - inset || t.iy >= N - inset) return;
   if (t.mat !== MAT_GOLD) return;
   const d = t.x * t.x + (t.y - 0.08) * (t.y - 0.08);
   if (d < lastD) { lastD = d; lastTile = t; }
